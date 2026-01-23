@@ -2,7 +2,7 @@ import { ActionOutput, ResearcherInput, ResearcherOutput } from '../types';
 import { ActionRegistry } from './actions';
 import { getResearcherPrompt } from '@/lib/prompts/search/researcher';
 import SessionManager from '@/lib/session';
-import { Message, ReasoningResearchBlock } from '@/lib/types';
+import { Chunk, Message, ReasoningResearchBlock } from '@/lib/types';
 import formatChatHistoryAsString from '@/lib/utils/formatHistory';
 import { ToolCall } from '@/lib/models/types';
 
@@ -181,40 +181,148 @@ class Researcher {
       });
     }
 
-    const searchResults = actionOutput
-      .filter((a) => a.type === 'search_results')
-      .flatMap((a) => a.results);
+    const collectSearchResults = (outputs: ActionOutput[]) =>
+      outputs
+        .filter((a) => a.type === 'search_results')
+        .flatMap((a) => a.results);
 
+    const isHttpUrl = (url: string) =>
+      url.startsWith('http://') || url.startsWith('https://');
+
+    const isScrapeResult = (result: Chunk) =>
+      result.metadata?.source === 'scrape_url' || result.metadata?.scraped === true;
+
+    const hasScrapeError = (result: Chunk) =>
+      Boolean(result.metadata?.scrapeError);
+
+    const getResultRank = (result: Chunk) => {
+      if (isScrapeResult(result)) {
+        return hasScrapeError(result) ? 0 : 2;
+      }
+
+      return 1;
+    };
+
+    const isFileResult = (result: Chunk) => {
+      const url = result.metadata?.url;
+
+      if (typeof url === 'string' && url.startsWith('file_id://')) {
+        return true;
+      }
+
+      return Boolean(result.metadata?.fileId);
+    };
+
+    const isCitableResult = (result: Chunk) => {
+      if (isFileResult(result)) {
+        return true;
+      }
+
+      return isScrapeResult(result) && !hasScrapeError(result);
+    };
+
+    const initialSearchResults = collectSearchResults(actionOutput);
+    const urlsToScrape: string[] = [];
+    const seenScrapeUrls = new Set<string>();
+
+    initialSearchResults.forEach((result) => {
+      const url = result.metadata?.url;
+
+      if (!url || !isHttpUrl(url) || isScrapeResult(result)) {
+        return;
+      }
+
+      if (!seenScrapeUrls.has(url)) {
+        seenScrapeUrls.add(url);
+        urlsToScrape.push(url);
+      }
+    });
+
+    if (urlsToScrape.length > 0 && ActionRegistry.get('scrape_url')) {
+      for (let i = 0; i < urlsToScrape.length; i += 3) {
+        const batch = urlsToScrape.slice(i, i + 3);
+
+        try {
+          const output = await ActionRegistry.execute(
+            'scrape_url',
+            { urls: batch },
+            {
+              llm: input.config.llm,
+              embedding: input.config.embedding,
+              session,
+              researchBlockId,
+              fileIds: input.config.fileIds,
+            },
+          );
+          actionOutput.push(output);
+        } catch (error) {
+          console.log('[researcher] scrape_url failed', { batch, error });
+        }
+      }
+    }
+
+    const searchResults = collectSearchResults(actionOutput);
+    const filteredSearchResults: Chunk[] = [];
     const seenUrls = new Map<string, number>();
 
-    const filteredSearchResults = searchResults
-      .map((result, index) => {
-        if (result.metadata.url && !seenUrls.has(result.metadata.url)) {
-          seenUrls.set(result.metadata.url, index);
-          return result;
-        } else if (result.metadata.url && seenUrls.has(result.metadata.url)) {
-          const existingIndex = seenUrls.get(result.metadata.url)!;
+    searchResults.forEach((result) => {
+      const url = result.metadata?.url;
 
-          const existingResult = searchResults[existingIndex];
+      if (!url) {
+        filteredSearchResults.push(result);
+        return;
+      }
 
-          existingResult.content += `\n\n${result.content}`;
+      const existingIndex = seenUrls.get(url);
+      if (existingIndex === undefined) {
+        seenUrls.set(url, filteredSearchResults.length);
+        filteredSearchResults.push(result);
+        return;
+      }
 
-          return undefined;
+      const existingResult = filteredSearchResults[existingIndex];
+      const existingRank = getResultRank(existingResult);
+      const incomingRank = getResultRank(result);
+
+      if (incomingRank > existingRank) {
+        filteredSearchResults[existingIndex] = result;
+        return;
+      }
+
+      if (incomingRank === existingRank) {
+        if (incomingRank === 2) {
+          return;
         }
 
-        return result;
-      })
-      .filter((r) => r !== undefined);
-
-    session.emitBlock({
-      id: crypto.randomUUID(),
-      type: 'source',
-      data: filteredSearchResults,
+        existingResult.content += `\n\n${result.content}`;
+      }
     });
+
+    const citableResults = filteredSearchResults.filter(isCitableResult);
+    const lightResults = filteredSearchResults.filter(
+      (result) => !isCitableResult(result),
+    );
+
+    if (citableResults.length > 0) {
+      session.emitBlock({
+        id: crypto.randomUUID(),
+        type: 'source',
+        data: citableResults,
+      });
+    }
+
+    if (lightResults.length > 0) {
+      session.emitBlock({
+        id: crypto.randomUUID(),
+        type: 'source_light',
+        data: lightResults,
+      });
+    }
 
     return {
       findings: actionOutput,
-      searchFindings: filteredSearchResults,
+      searchFindings: citableResults,
+      lightSearchFindings: lightResults,
     };
   }
 }

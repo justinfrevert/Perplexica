@@ -41,7 +41,10 @@ class APISearchAgent {
     if (searchResults) {
       session.emit('data', {
         type: 'searchResults',
-        data: searchResults.searchFindings,
+        data: {
+          sources: searchResults.searchFindings,
+          lightSources: searchResults.lightSearchFindings,
+        },
       });
     }
 

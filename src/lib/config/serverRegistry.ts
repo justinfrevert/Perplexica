@@ -11,5 +11,26 @@ export const getConfiguredModelProviderById = (
   return getConfiguredModelProviders().find((p) => p.id === id) ?? undefined;
 };
 
-export const getSearxngURL = () =>
-  configManager.getConfig('search.searxngURL', '');
+export const getSearxngURLs = (): string[] => {
+  configManager.refreshFromDisk();
+  const configured = configManager.getConfig('search.searxngURLs', []);
+  const urlList = Array.isArray(configured)
+    ? configured
+        .filter((url) => typeof url === 'string')
+        .map((url) => url.trim())
+        .filter(Boolean)
+    : [];
+
+  if (urlList.length > 0) {
+    return urlList;
+  }
+
+  const single = configManager.getConfig('search.searxngURL', '');
+  if (typeof single === 'string' && single.trim()) {
+    return [single.trim()];
+  }
+
+  return [];
+};
+
+export const getSearxngURL = () => getSearxngURLs()[0] ?? '';

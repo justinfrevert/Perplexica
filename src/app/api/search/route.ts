@@ -16,11 +16,23 @@ interface ChatRequestBody {
   systemInstructions?: string;
 }
 
+const isSearchDebugEnabled = () => {
+  const flag = (process.env.DEBUG_SEARCH ?? '').toLowerCase();
+  return flag === '1' || flag === 'true' || flag === 'yes' || flag === 'on';
+};
+
 export const POST = async (req: Request) => {
   try {
     const body: ChatRequestBody = await req.json();
+    const debugSearch = isSearchDebugEnabled();
 
     if (!body.sources || !body.query) {
+      if (debugSearch) {
+        console.log('[search] request:invalid', {
+          hasSources: !!body.sources,
+          hasQuery: !!body.query,
+        });
+      }
       return Response.json(
         { message: 'Missing sources or query' },
         { status: 400 },
@@ -48,6 +60,18 @@ export const POST = async (req: Request) => {
     });
 
     const session = SessionManager.createSession();
+    const log = (...args: unknown[]) => {
+      if (!debugSearch) return;
+      console.log(`[search:${session.id}]`, ...args);
+    };
+
+    log('request:start', {
+      stream: body.stream,
+      sources: body.sources,
+      optimizationMode: body.optimizationMode,
+      queryLength: body.query.length,
+      historyLength: body.history.length,
+    });
 
     const agent = new APISearchAgent();
 
@@ -74,14 +98,39 @@ export const POST = async (req: Request) => {
         ) => {
           let message = '';
           let sources: any[] = [];
+          let lightSources: any[] = [];
+          let responseChunks = 0;
+          let responseChars = 0;
 
           session.subscribe((event: string, data: Record<string, any>) => {
             if (event === 'data') {
               try {
                 if (data.type === 'response') {
                   message += data.data;
+                  responseChunks += 1;
+                  if (typeof data.data === 'string') {
+                    responseChars += data.data.length;
+                  }
+                  if (responseChunks === 1 || responseChunks % 50 === 0) {
+                    log('response:progress', {
+                      chunks: responseChunks,
+                      chars: responseChars,
+                    });
+                  }
                 } else if (data.type === 'searchResults') {
-                  sources = data.data;
+                  if (Array.isArray(data.data)) {
+                    sources = data.data;
+                    lightSources = [];
+                  } else {
+                    sources = data.data?.sources || [];
+                    lightSources = data.data?.lightSources || [];
+                  }
+                  log('search:results', {
+                    sources: sources.length,
+                    lightSources: lightSources.length,
+                  });
+                } else if (data.type === 'researchComplete') {
+                  log('research:complete');
                 }
               } catch (error) {
                 reject(
@@ -94,10 +143,20 @@ export const POST = async (req: Request) => {
             }
 
             if (event === 'end') {
-              resolve(Response.json({ message, sources }, { status: 200 }));
+              log('request:done', {
+                responseChunks,
+                responseChars,
+              });
+              resolve(
+                Response.json(
+                  { message, sources, lightSources },
+                  { status: 200 },
+                ),
+              );
             }
 
             if (event === 'error') {
+              log('request:error', { error: data });
               reject(
                 Response.json(
                   { message: 'Search error', error: data },
@@ -118,6 +177,9 @@ export const POST = async (req: Request) => {
     const stream = new ReadableStream({
       start(controller) {
         let sources: any[] = [];
+        let lightSources: any[] = [];
+        let responseChunks = 0;
+        let responseChars = 0;
 
         controller.enqueue(
           encoder.encode(
@@ -129,6 +191,7 @@ export const POST = async (req: Request) => {
         );
 
         signal.addEventListener('abort', () => {
+          log('stream:abort');
           session.removeAllListeners();
 
           try {
@@ -142,6 +205,16 @@ export const POST = async (req: Request) => {
 
             try {
               if (data.type === 'response') {
+                responseChunks += 1;
+                if (typeof data.data === 'string') {
+                  responseChars += data.data.length;
+                }
+                if (responseChunks === 1 || responseChunks % 50 === 0) {
+                  log('response:progress', {
+                    chunks: responseChunks,
+                    chars: responseChars,
+                  });
+                }
                 controller.enqueue(
                   encoder.encode(
                     JSON.stringify({
@@ -151,7 +224,17 @@ export const POST = async (req: Request) => {
                   ),
                 );
               } else if (data.type === 'searchResults') {
-                sources = data.data;
+                if (Array.isArray(data.data)) {
+                  sources = data.data;
+                  lightSources = [];
+                } else {
+                  sources = data.data?.sources || [];
+                  lightSources = data.data?.lightSources || [];
+                }
+                log('search:results', {
+                  sources: sources.length,
+                  lightSources: lightSources.length,
+                });
                 controller.enqueue(
                   encoder.encode(
                     JSON.stringify({
@@ -160,6 +243,18 @@ export const POST = async (req: Request) => {
                     }) + '\n',
                   ),
                 );
+                if (lightSources.length > 0) {
+                  controller.enqueue(
+                    encoder.encode(
+                      JSON.stringify({
+                        type: 'light_sources',
+                        data: lightSources,
+                      }) + '\n',
+                    ),
+                  );
+                }
+              } else if (data.type === 'researchComplete') {
+                log('research:complete');
               }
             } catch (error) {
               controller.error(error);
@@ -169,6 +264,10 @@ export const POST = async (req: Request) => {
           if (event === 'end') {
             if (signal.aborted) return;
 
+            log('request:done', {
+              responseChunks,
+              responseChars,
+            });
             controller.enqueue(
               encoder.encode(
                 JSON.stringify({
@@ -182,6 +281,7 @@ export const POST = async (req: Request) => {
           if (event === 'error') {
             if (signal.aborted) return;
 
+            log('request:error', { error: data });
             controller.error(data);
           }
         });

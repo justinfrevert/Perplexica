@@ -48,6 +48,12 @@ export type SourceBlock = {
   data: Chunk[];
 };
 
+export type LightSourceBlock = {
+  id: string;
+  type: 'source_light';
+  data: Chunk[];
+};
+
 export type SuggestionBlock = {
   id: string;
   type: 'suggestion';
@@ -118,6 +124,7 @@ export type ResearchBlock = {
 export type Block =
   | TextBlock
   | SourceBlock
+  | LightSourceBlock
   | SuggestionBlock
   | WidgetBlock
   | ResearchBlock;

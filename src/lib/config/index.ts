@@ -10,6 +10,7 @@ class ConfigManager {
     '/data/config.json',
   );
   configVersion = 1;
+  configMtimeMs: number | null = null;
   currentConfig: Config = {
     version: this.configVersion,
     setupComplete: false,
@@ -18,6 +19,7 @@ class ConfigManager {
     modelProviders: [],
     search: {
       searxngURL: '',
+      searxngURLs: [],
     },
   };
   uiConfigSections: UIConfigSections = {
@@ -130,6 +132,7 @@ class ConfigManager {
       this.configPath,
       JSON.stringify(this.currentConfig, null, 2),
     );
+    this.updateConfigMtime();
   }
 
   private initializeConfig() {
@@ -139,11 +142,13 @@ class ConfigManager {
         this.configPath,
         JSON.stringify(this.currentConfig, null, 2),
       );
+      this.updateConfigMtime();
     } else {
       try {
         this.currentConfig = JSON.parse(
           fs.readFileSync(this.configPath, 'utf-8'),
         );
+        this.updateConfigMtime();
       } catch (err) {
         if (err instanceof SyntaxError) {
           console.error(
@@ -157,6 +162,7 @@ class ConfigManager {
             this.configPath,
             JSON.stringify(this.currentConfig, null, 2),
           );
+          this.updateConfigMtime();
           return;
         } else {
           console.log('Unknown error reading config file:', err);
@@ -170,6 +176,38 @@ class ConfigManager {
   private migrateConfig(config: Config): Config {
     /* TODO: Add migrations */
     return config;
+  }
+
+  private updateConfigMtime() {
+    try {
+      this.configMtimeMs = fs.statSync(this.configPath).mtimeMs;
+    } catch (err) {
+      console.error(`Unable to stat config file at ${this.configPath}:`, err);
+    }
+  }
+
+  public refreshFromDisk() {
+    let stats: fs.Stats;
+
+    try {
+      stats = fs.statSync(this.configPath);
+    } catch (err) {
+      console.error(`Unable to stat config file at ${this.configPath}:`, err);
+      return;
+    }
+
+    if (this.configMtimeMs !== null && stats.mtimeMs <= this.configMtimeMs) {
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(fs.readFileSync(this.configPath, 'utf-8'));
+      this.currentConfig = this.migrateConfig(parsed);
+    } catch (err) {
+      console.error(`Error parsing config file at ${this.configPath}:`, err);
+    } finally {
+      this.configMtimeMs = stats.mtimeMs;
+    }
   }
 
   private initializeFromEnv() {
