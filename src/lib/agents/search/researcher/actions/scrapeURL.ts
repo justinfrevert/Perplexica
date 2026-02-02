@@ -1,23 +1,41 @@
 import z from 'zod';
 import { ResearchAction } from '../../types';
-import { Chunk, ReadingResearchBlock } from '@/lib/types';
+import { Chunk } from '@/lib/types';
 import TurnDown from 'turndown';
+import { getCrawl4aiURLs } from '@/lib/config/serverRegistry';
 
 const turndownService = new TurnDown();
-const CRAWL4AI_ENDPOINT =
-  process.env.CRAWL4AI_ENDPOINT ?? 'http://localhost:11235/crawl-lite';
 const RETRY_BASE_DELAY_MS = 1500;
 const MAX_RETRIES_PER_URL = 4;
+let crawl4aiEndpointIndex = 0;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const isRetryableStatus = (status: number) => status >= 500 && status <= 599;
 
-const fetchCrawl4AiWithRetry = async (payload: Record<string, unknown>) => {
+const pickCrawl4aiEndpoint = (endpoints: string[]) => {
+  if (endpoints.length === 0) {
+    return 'http://localhost:11235/crawl-lite';
+  }
+
+  if (endpoints.length === 1) {
+    return endpoints[0];
+  }
+
+  const index = crawl4aiEndpointIndex % endpoints.length;
+  crawl4aiEndpointIndex += 1;
+
+  return endpoints[index];
+};
+
+const fetchCrawl4AiWithRetry = async (
+  endpoint: string,
+  payload: Record<string, unknown>,
+) => {
   for (let attempt = 0; attempt <= MAX_RETRIES_PER_URL; attempt += 1) {
     let response: Response;
 
     try {
-      response = await fetch(CRAWL4AI_ENDPOINT, {
+      response = await fetch(endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -45,11 +63,11 @@ const fetchCrawl4AiWithRetry = async (payload: Record<string, unknown>) => {
     }
 
     throw new Error(
-      `crawl4ai request failed: ${response.status} ${response.statusText}`,
+      `crawl4ai request failed: ${endpoint} ${response.status} ${response.statusText}`,
     );
   }
 
-  throw new Error('crawl4ai request failed after retries');
+  throw new Error(`crawl4ai request failed after retries: ${endpoint}`);
 };
 
 type Crawl4AIResult = {
@@ -166,15 +184,19 @@ const scrapeURLAction: ResearchAction<typeof schema> = {
     let readingBlockId = crypto.randomUUID();
     let readingEmitted = false;
 
-    const researchBlock = additionalConfig.session.getBlock(
-      additionalConfig.researchBlockId,
-    );
+    const researchBlockId = additionalConfig.researchBlockId;
+    const researchBlock = additionalConfig.session.getBlock(researchBlockId);
 
     const results: Chunk[] = [];
 
     let crawlResults: Crawl4AIResult[] = [];
 
     try {
+      const crawl4aiEndpoints = getCrawl4aiURLs();
+      const endpoint =
+        crawl4aiEndpoints.length > 0
+          ? pickCrawl4aiEndpoint(crawl4aiEndpoints)
+          : 'http://localhost:11235/crawl-lite';
       const payload = {
         urls,
         browser_config: {
@@ -187,7 +209,7 @@ const scrapeURLAction: ResearchAction<typeof schema> = {
         },
       };
 
-      const response = await fetchCrawl4AiWithRetry(payload);
+      const response = await fetchCrawl4AiWithRetry(endpoint, payload);
 
       const responseText = await response.text();
       let responseJson: Crawl4AIResponse | Crawl4AIResult[] = [];
@@ -262,67 +284,72 @@ const scrapeURLAction: ResearchAction<typeof schema> = {
         content ||
         `Failed to extract content from ${resolvedUrl}: empty response`;
 
-      if (
-        !readingEmitted &&
-        researchBlock &&
-        researchBlock.type === 'research'
-      ) {
-        readingEmitted = true;
-        researchBlock.data.subSteps.push({
-          id: readingBlockId,
-          type: 'reading',
-          reading: [
+      if (researchBlock && researchBlock.type === 'research') {
+        if (!readingEmitted) {
+          readingEmitted = true;
+          additionalConfig.session.updateBlock(researchBlockId, [
             {
-              content: '',
-              metadata: {
-                url: resolvedUrl,
-                title: title,
+              op: 'add',
+              path: '/data/subSteps/-',
+              value: {
+                id: readingBlockId,
+                type: 'reading',
+                reading: [
+                  {
+                    content: '',
+                    metadata: {
+                      url: resolvedUrl,
+                      title: title,
+                    },
+                  },
+                ],
               },
             },
-          ],
-        });
+          ]);
+        } else {
+          const latestBlock = additionalConfig.session.getBlock(researchBlockId);
+          if (latestBlock && latestBlock.type === 'research') {
+            const subStepIndex = latestBlock.data.subSteps.findIndex(
+              (step: any) => step.id === readingBlockId,
+            );
 
-        additionalConfig.session.updateBlock(
-          additionalConfig.researchBlockId,
-          [
-            {
-              op: 'replace',
-              path: '/data/subSteps',
-              value: researchBlock.data.subSteps,
-            },
-          ],
-        );
-      } else if (
-        readingEmitted &&
-        researchBlock &&
-        researchBlock.type === 'research'
-      ) {
-        const subStepIndex = researchBlock.data.subSteps.findIndex(
-          (step: any) => step.id === readingBlockId,
-        );
-
-        const subStep = researchBlock.data.subSteps[
-          subStepIndex
-        ] as ReadingResearchBlock;
-
-        subStep.reading.push({
-          content: '',
-          metadata: {
-            url: resolvedUrl,
-            title: title,
-          },
-        });
-
-        additionalConfig.session.updateBlock(
-          additionalConfig.researchBlockId,
-          [
-            {
-              op: 'replace',
-              path: '/data/subSteps',
-              value: researchBlock.data.subSteps,
-            },
-          ],
-        );
+            if (subStepIndex === -1) {
+              additionalConfig.session.updateBlock(researchBlockId, [
+                {
+                  op: 'add',
+                  path: '/data/subSteps/-',
+                  value: {
+                    id: readingBlockId,
+                    type: 'reading',
+                    reading: [
+                      {
+                        content: '',
+                        metadata: {
+                          url: resolvedUrl,
+                          title: title,
+                        },
+                      },
+                    ],
+                  },
+                },
+              ]);
+            } else {
+              additionalConfig.session.updateBlock(researchBlockId, [
+                {
+                  op: 'add',
+                  path: `/data/subSteps/${subStepIndex}/reading/-`,
+                  value: {
+                    content: '',
+                    metadata: {
+                      url: resolvedUrl,
+                      title: title,
+                    },
+                  },
+                },
+              ]);
+            }
+          }
+        }
       }
 
       results.push({

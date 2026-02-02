@@ -4,6 +4,7 @@ import SessionManager from '@/lib/session';
 import { ChatTurnMessage } from '@/lib/types';
 import { SearchSources } from '@/lib/agents/search/types';
 import APISearchAgent from '@/lib/agents/search/api';
+import { createSearchDebugLogger, isSearchDebugEnabled } from '@/lib/agents/search/debug';
 
 interface ChatRequestBody {
   optimizationMode: 'speed' | 'balanced' | 'quality';
@@ -15,11 +16,6 @@ interface ChatRequestBody {
   stream?: boolean;
   systemInstructions?: string;
 }
-
-const isSearchDebugEnabled = () => {
-  const flag = (process.env.DEBUG_SEARCH ?? '').toLowerCase();
-  return flag === '1' || flag === 'true' || flag === 'yes' || flag === 'on';
-};
 
 export const POST = async (req: Request) => {
   try {
@@ -60,10 +56,7 @@ export const POST = async (req: Request) => {
     });
 
     const session = SessionManager.createSession();
-    const log = (...args: unknown[]) => {
-      if (!debugSearch) return;
-      console.log(`[search:${session.id}]`, ...args);
-    };
+    const log = createSearchDebugLogger(session.id, debugSearch);
 
     log('request:start', {
       stream: body.stream,

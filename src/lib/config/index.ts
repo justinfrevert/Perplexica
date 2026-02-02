@@ -20,6 +20,8 @@ class ConfigManager {
     search: {
       searxngURL: '',
       searxngURLs: [],
+      crawl4aiURL: '',
+      crawl4aiURLs: [],
     },
   };
   uiConfigSections: UIConfigSections = {
@@ -115,6 +117,17 @@ class ConfigManager {
         scope: 'server',
         env: 'SEARXNG_API_URL',
       },
+      {
+        name: 'Crawl4AI URL',
+        key: 'crawl4aiURL',
+        type: 'string',
+        required: false,
+        description: 'The URL of your Crawl4AI instance',
+        placeholder: 'http://localhost:11235/crawl-lite',
+        default: 'http://localhost:11235/crawl-lite',
+        scope: 'server',
+        env: 'CRAWL4AI_ENDPOINT',
+      },
     ],
   };
 
@@ -174,8 +187,28 @@ class ConfigManager {
   }
 
   private migrateConfig(config: Config): Config {
-    /* TODO: Add migrations */
-    return config;
+    const nextConfig: Config = {
+      ...config,
+      search: { ...(config.search ?? {}) },
+    };
+
+    if (!Array.isArray(nextConfig.search.searxngURLs)) {
+      nextConfig.search.searxngURLs = [];
+    }
+
+    if (typeof nextConfig.search.searxngURL !== 'string') {
+      nextConfig.search.searxngURL = '';
+    }
+
+    if (!Array.isArray(nextConfig.search.crawl4aiURLs)) {
+      nextConfig.search.crawl4aiURLs = [];
+    }
+
+    if (typeof nextConfig.search.crawl4aiURL !== 'string') {
+      nextConfig.search.crawl4aiURL = '';
+    }
+
+    return nextConfig;
   }
 
   private updateConfigMtime() {
